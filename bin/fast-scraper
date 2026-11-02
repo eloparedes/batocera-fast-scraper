@@ -1,0 +1,210 @@
+#!/bin/bash
+# ==============================================================================
+#  Fast Scraper CLI Manager for Batocera
+#  Multi-threaded Media Scraper, Inspector, and Cleaner
+# ==============================================================================
+
+# Resolve script directory even through symlinks
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+INSTALL_DIR="$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
+
+# Detect src location (supports both repo structure and flat structure)
+if [ -d "$INSTALL_DIR/src" ]; then
+    SRC_DIR="$INSTALL_DIR/src"
+elif [ -d "$SCRIPT_DIR/src" ]; then
+    SRC_DIR="$SCRIPT_DIR/src"
+else
+    SRC_DIR="$SCRIPT_DIR"
+fi
+
+PID_FILE="/userdata/system/logs/fast_scraper.pid"
+LOG_FILE="/userdata/system/logs/fast_scraper.log"
+PYTHON_SCRIPT="$SRC_DIR/fast_scraper.py"
+LIST_SCRIPT="$SRC_DIR/list_systems.py"
+CLEAN_SCRIPT="$SRC_DIR/clean_media.py"
+ORPHAN_SCRIPT="$SRC_DIR/clean_orphans.py"
+STATUS_SCRIPT="$SRC_DIR/scraper_status.py"
+CONFIG_SCRIPT="$SRC_DIR/manage_config.py"
+
+# ANSI Colors
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+C_GREEN="\033[1;32m"
+C_YELLOW="\033[1;33m"
+C_CYAN="\033[1;36m"
+C_RED="\033[1;31m"
+C_BLUE="\033[1;34m"
+C_DIM="\033[2m"
+
+get_pid() {
+    pgrep -f "fast_scraper.py" | head -n 1
+}
+
+show_help() {
+    echo -e "${C_BOLD}${C_CYAN}================================================================================${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}        FAST-SCRAPER CLI - Gerenciador Completo de Mídias para Batocera       ${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}================================================================================${C_RESET}"
+    echo -e "${C_DIM}Download acelerado (5 threads), identificação automática e limpeza inteligente de mídias.${C_RESET}"
+    echo ""
+    echo -e "${C_BOLD}USO:${C_RESET}"
+    echo -e "  ${C_GREEN}fast-scraper${C_RESET} ${C_YELLOW}<comando>${C_RESET} [opções...]"
+    echo ""
+    echo -e "${C_BOLD}COMANDOS DISPONÍVEIS:${C_RESET}"
+    echo ""
+    echo -e "  ${C_BOLD}${C_CYAN}1. CONSULTA & CONFIGURAÇÃO${C_RESET}"
+    echo -e "    ${C_GREEN}config${C_RESET}                   Visualiza, cadastra ou testa sua conta do ScreenScraper."
+    echo -e "    ${C_GREEN}list${C_RESET} (ou ${C_GREEN}-l${C_RESET})             Lista todas as plataformas ativas, total de ROMs e"
+    echo -e "                             percentual de mídias (Capas, Screenshots, Logos e Vídeos)."
+    echo -e "    ${C_GREEN}status${C_RESET}                   Exibe a barra de progresso visual, percentual, total restante e PID."
+    echo -e "    ${C_GREEN}log${C_RESET}                      Acompanha o download ao vivo no terminal com contador [X/TOTAL]."
+    echo ""
+    echo -e "  ${C_BOLD}${C_CYAN}2. SCRAPING & DOWNLOAD${C_RESET}"
+    echo -e "    ${C_GREEN}start${C_RESET}                    Detecta ${C_BOLD}automaticamente${C_RESET} todas as plataformas com jogos"
+    echo -e "                             instalados e faz o scrape completo daquelas com mídias pendentes."
+    echo -e "                             ${C_DIM}(Pula sistemas que já estão 100% completos).${C_RESET}"
+    echo -e "    ${C_GREEN}start <sis1> <sis2>...${C_RESET}   Scrapeia apenas as plataformas especificadas."
+    echo ""
+    echo -e "  ${C_BOLD}${C_CYAN}3. LIMPEZA & MANUTENÇÃO DE ESPAÇO${C_RESET}"
+    echo -e "    ${C_GREEN}clean <sistema>${C_RESET}          Remove com segurança as mídias de uma plataforma específica."
+    echo -e "                             ${C_RED}* NUNCA toca nas suas ROMs / jogos!${C_RESET}"
+    echo -e "                             ${C_DIM}Atualiza automaticamente o gamelist.xml e recarrega a interface.${C_RESET}"
+    echo -e "                             Opções:"
+    echo -e "                               ${C_YELLOW}--videos${C_RESET}    Remove apenas os vídeos (ótimo para liberar GBs)"
+    echo -e "                               ${C_YELLOW}--images${C_RESET}    Remove apenas capas, thumbs e logos"
+    echo -e "                               ${C_YELLOW}--dry-run${C_RESET}   Simula a limpeza e mostra o espaço a liberar"
+    echo -e "                               ${C_YELLOW}-y, --force${C_RESET} Não pede confirmação interativa"
+    echo ""
+    echo -e "    ${C_GREEN}clean-orphans${C_RESET}            Localiza e remove mídias órfãs (arquivos em images/ e videos/"
+    echo -e "                             que não pertencem a nenhuma ROM existente na pasta)."
+    echo -e "                             Também remove entradas mortas do gamelist.xml."
+    echo -e "                             Opções:"
+    echo -e "                               ${C_YELLOW}<sistema>${C_RESET}   Executa apenas para uma plataforma (ex: mame)"
+    echo -e "                               ${C_YELLOW}--dry-run${C_RESET}   Apenas lista as mídias órfãs e espaço em disco"
+    echo -e "                               ${C_YELLOW}-y, --force${C_RESET} Apaga direto sem confirmação"
+    echo ""
+    echo -e "  ${C_BOLD}${C_CYAN}4. CONTROLE DO PROCESSO${C_RESET}"
+    echo -e "    ${C_GREEN}stop${C_RESET}                     Interrompe de forma segura o scraper em background."
+    echo -e "    ${C_GREEN}restart [sistemas...]${C_RESET}    Reinicia o processo (útil após alterações)."
+    echo -e "    ${C_GREEN}help${C_RESET} (ou ${C_GREEN}--help${C_RESET}, ${C_GREEN}-h${C_RESET})   Exibe este manual de ajuda."
+    echo ""
+    echo -e "${C_BOLD}EXEMPLOS PRÁTICOS:${C_RESET}"
+    echo -e "  ${C_DIM}# 1. Configurar ou verificar credenciais:${C_RESET}"
+    echo -e "  ${C_BOLD}fast-scraper config${C_RESET}"
+    echo ""
+    echo -e "  ${C_DIM}# 2. Ver o panorama de todas as plataformas instaladas:${C_RESET}"
+    echo -e "  ${C_BOLD}fast-scraper list${C_RESET}"
+    echo ""
+    echo -e "  ${C_DIM}# 3. Ver o progresso atual com barra visual:${C_RESET}"
+    echo -e "  ${C_BOLD}fast-scraper status${C_RESET}"
+    echo ""
+    echo -e "  ${C_DIM}# 4. Iniciar o scrape de tudo que estiver faltando:${C_RESET}"
+    echo -e "  ${C_BOLD}fast-scraper start${C_RESET}"
+    echo ""
+    echo -e "  ${C_DIM}# 5. Scrapear apenas Game Boy Advance e NES:${C_RESET}"
+    echo -e "  ${C_BOLD}fast-scraper start gba nes${C_RESET}"
+    echo ""
+    echo -e "  ${C_DIM}# 6. Simular quanto espaço você recupera se limpar mídias órfãs:${C_RESET}"
+    echo -e "  ${C_BOLD}fast-scraper clean-orphans --dry-run${C_RESET}"
+    echo ""
+    echo -e "  ${C_DIM}# 7. Limpar todas as mídias órfãs de todo o Batocera:${C_RESET}"
+    echo -e "  ${C_BOLD}fast-scraper clean-orphans${C_RESET}"
+    echo ""
+    echo -e "${C_BOLD}${C_CYAN}================================================================================${C_RESET}"
+}
+
+case "$1" in
+    config)
+        shift
+        python3 "$CONFIG_SCRIPT" "$@"
+        ;;
+
+    list|--list|-l)
+        python3 "$LIST_SCRIPT"
+        ;;
+
+    clean)
+        shift
+        python3 "$CLEAN_SCRIPT" "$@"
+        ;;
+
+    clean-orphans|orphans|clean-orphan)
+        shift
+        python3 "$ORPHAN_SCRIPT" "$@"
+        ;;
+
+    status)
+        python3 "$STATUS_SCRIPT"
+        ;;
+
+    log)
+        if [ -f "$LOG_FILE" ]; then
+            echo -e "\033[1;34mSeguindo log do Scraper ao vivo (Ctrl+C para sair):\033[0m"
+            tail -f "$LOG_FILE"
+        else
+            echo "Arquivo de log não encontrado: $LOG_FILE"
+        fi
+        ;;
+
+    stop)
+        PID=$(get_pid)
+        if [ -n "$PID" ]; then
+            echo "Encerrando scraper (PID: $PID)..."
+            kill "$PID" 2>/dev/null
+            sleep 1
+            if kill -0 "$PID" 2>/dev/null; then
+                kill -9 "$PID" 2>/dev/null
+            fi
+            echo -e "\033[1;31mScraper finalizado.\033[0m"
+        else
+            echo "Scraper não está em execução."
+        fi
+        ;;
+
+    start)
+        PID=$(get_pid)
+        if [ -n "$PID" ]; then
+            echo -e "\033[1;33mScraper já está em execução (PID: $PID).\033[0m"
+            echo "Use 'fast-scraper status' ou 'fast-scraper log' para acompanhar."
+            exit 0
+        fi
+        shift # remove 'start'
+        SYSTEMS="$@"
+        if [ -z "$SYSTEMS" ]; then
+            echo -e "\033[1;36mNenhum sistema informado: Identificando automaticamente todas as plataformas com jogos...\033[0m"
+            nohup python3 "$PYTHON_SCRIPT" > /userdata/system/logs/fast_scraper_runner.log 2>&1 &
+        else
+            echo -e "\033[1;36mIniciando Scraper para sistemas específicos: $SYSTEMS\033[0m"
+            nohup python3 "$PYTHON_SCRIPT" $SYSTEMS > /userdata/system/logs/fast_scraper_runner.log 2>&1 &
+        fi
+        NEW_PID=$!
+        echo "$NEW_PID" > "$PID_FILE"
+        echo -e "\033[1;32mScraper iniciado com sucesso (PID: $NEW_PID)!\033[0m"
+        echo "Acompanhe com: fast-scraper log"
+        ;;
+
+    restart)
+        $0 stop
+        sleep 1
+        shift
+        $0 start "$@"
+        ;;
+
+    help|--help|-h)
+        show_help
+        ;;
+
+    *)
+        PID=$(get_pid)
+        if [ -n "$PID" ]; then
+            python3 "$STATUS_SCRIPT"
+        else
+            show_help
+        fi
+        ;;
+esac
