@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 Modern Multi-Threaded Scraper for Batocera (5 Parallel Workers)
+Multi-Provider Edition: ScreenScraper + ArcadeDB (Arcade Italia) Fallback!
 Features:
 - Smart Resume: Scans existing media first; NEVER restarts from 0%!
+- Multi-Source: ScreenScraper (Primary) + ArcadeDB (Auto-fallback for MAME, FBNeo, NeoGeo, CPS, etc.).
 - Real-time visual progress counter [current/total | percent%].
 - Auto-detects all active platforms with games when run without arguments.
-- Downloads Boxart 2D (BR/US priority), In-game Screenshots (-thumb.png), Wheel/Marquee (-marquee.png), and Video Snaps (-video.mp4).
+- Downloads Boxart 2D / Flyers, In-game Screenshots (-thumb.png), Wheel/Marquee (-marquee.png), and Video Snaps (-video.mp4).
 - Safe multi-threaded gamelist.xml synchronization.
 - Storage guard: halts downloads if free space drops below threshold.
 - Auto-reloads EmulationStation after each system.
@@ -25,6 +27,10 @@ LOG_FILE = "/userdata/system/logs/fast_scraper.log"
 PID_FILE = "/userdata/system/logs/fast_scraper.pid"
 STATUS_JSON = "/userdata/system/logs/fast_scraper_status.json"
 ES_SYSTEMS_PATH = "/etc/emulationstation/es_systems.cfg"
+CONFIG_PATH = "/userdata/system/configs/fast_scraper/config.json"
+ES_SETTINGS_XML = "/userdata/system/configs/emulationstation/es_settings.cfg"
+BATOCERA_CONF = "/userdata/system/batocera.conf"
+
 MIN_FREE_GB = 22.0
 MAX_WORKERS = 5
 
@@ -80,14 +86,9 @@ class SystemProgress:
             self._write_status(pct, game_name)
             return self.processed, pct
 
-CONFIG_PATH = "/userdata/system/configs/fast_scraper/config.json"
-ES_SETTINGS_XML = "/userdata/system/configs/emulationstation/es_settings.cfg"
-BATOCERA_CONF = "/userdata/system/batocera.conf"
-
 def load_credentials():
     ss_user = ""
     ss_pass = ""
-    # 1. Check fast_scraper config.json
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -97,7 +98,6 @@ def load_credentials():
         except Exception:
             pass
 
-    # 2. Check es_settings.cfg
     if not ss_user and os.path.exists(ES_SETTINGS_XML):
         try:
             tree = ET.parse(ES_SETTINGS_XML)
@@ -109,7 +109,6 @@ def load_credentials():
         except Exception:
             pass
 
-    # 3. Check batocera.conf
     if not ss_user and os.path.exists(BATOCERA_CONF):
         try:
             with open(BATOCERA_CONF, "r", encoding="utf-8") as f:
@@ -124,9 +123,8 @@ def load_credentials():
 
     return ss_user, ss_pass
 
-# ScreenScraper API credentials
 try:
-    creds = requests.get('https://retrogamesets.fr/rgsx/manager/rgsx_screenscraper_credentials_api.php', timeout=10).json()
+    creds = requests.get('https://retrogamesets.fr/rgsx/manager/rgsx_screenscraper_credentials_api.php', timeout=8).json()
     DEVID = creds['devid']
     DEVPASS = creds['devpassword']
 except Exception as e:
@@ -135,7 +133,14 @@ except Exception as e:
     log(f"ScreenScraper credentials error: {e}")
 
 SS_USER, SS_PASS = load_credentials()
-API_URL = "https://api.screenscraper.fr/api2/jeuInfos.php"
+SS_API_URL = "https://api.screenscraper.fr/api2/jeuInfos.php"
+ARCADEDB_API_URL = "http://adb.arcadeitalia.net/service_scraper.php"
+
+ARCADE_SYSTEMS = {
+    'mame', 'fbneo', 'neogeo', 'arcadeclassics',
+    'cps1', 'cps2', 'cps3', 'atomiswave', 'naomi',
+    'model2', 'model3'
+}
 
 SYSTEM_IDS = {
     # Arcade
@@ -315,11 +320,31 @@ def auto_detect_systems():
             vids = len(glob.glob(os.path.join(real_path, "videos", "*-video.*")))
             covers = len(glob.glob(os.path.join(real_path, "images", "*-image.*")))
 
-            if thumbs < (num_games * 0.90) or covers < (num_games * 0.90):
-                detected.append((sname, num_games, covers, thumbs))
+            if sname in ARCADE_SYSTEMS:
+                if vids < (num_games * 0.95) or covers < (num_games * 0.95) or thumbs < (num_games * 0.95):
+                    detected.append((sname, num_games, covers, vids))
+            else:
+                if thumbs < (num_games * 0.90) or covers < (num_games * 0.90):
+                    detected.append((sname, num_games, covers, thumbs))
 
     detected.sort(key=lambda x: (x[1] - x[3]), reverse=True)
     return [d[0] for d in detected]
+
+def query_arcadedb(rom_short_name):
+    params = {
+        "ajax": "query_mame",
+        "lang": "en",
+        "game_name": rom_short_name
+    }
+    try:
+        r = requests.get(ARCADEDB_API_URL, params=params, timeout=10)
+        if r.status_code == 200:
+            res = r.json().get("result", [])
+            if res:
+                return res[0]
+    except Exception:
+        pass
+    return None
 
 def process_single_game(system_name, sys_id, base_dir, img_dir, vid_dir, game_elem, progress_tracker):
     path_elem = game_elem.find('path')
@@ -345,10 +370,18 @@ def process_single_game(system_name, sys_id, base_dir, img_dir, vid_dir, game_el
     need_wheel = not has_wheel
     need_box = not has_box
 
+    if not (need_video or need_ss or need_wheel or need_box):
+        progress_tracker.advance(base_no_ext, success=False)
+        return False
+
     if need_video and get_free_gb("/media/SHARE_1") < MIN_FREE_GB:
         need_video = False
 
-    params = {
+    downloaded_any = False
+    source_used = "ScreenScraper"
+
+    # --- 1. TENTATIVA PRINCIPAL: ScreenScraper API ---
+    ss_params = {
         "devid": DEVID,
         "devpassword": DEVPASS,
         "softname": "RGSX",
@@ -359,144 +392,196 @@ def process_single_game(system_name, sys_id, base_dir, img_dir, vid_dir, game_el
         "romnom": fn
     }
 
+    medias = []
+    jeu_data = {}
+    ss_failed = False
+
     try:
-        r = requests.get(API_URL, params=params, timeout=15)
+        r = requests.get(SS_API_URL, params=ss_params, timeout=12)
         if r.status_code == 200:
             jeu_data = r.json().get('response', {}).get('jeu', {})
             medias = jeu_data.get('medias', [])
-        elif r.status_code == 430:
-            time.sleep(5)
-            progress_tracker.advance(base_no_ext, success=False)
-            return False
+        elif r.status_code in (430, 431):
+            ss_failed = True
         else:
-            progress_tracker.advance(base_no_ext, success=False)
-            return False
+            ss_failed = True
     except Exception:
-        progress_tracker.advance(base_no_ext, success=False)
-        return False
+        ss_failed = True
 
-    if not medias and not jeu_data:
-        progress_tracker.advance(base_no_ext, success=False)
-        return False
-
-    downloaded_any = False
-
-    # 1. Capa (Boxart)
-    if need_box:
-        box_url = None
-        for reg in ('br', 'us', 'wor', 'eu', 'ss', 'jp'):
-            for m in medias:
-                if m.get('type') == 'box-2D' and m.get('region') == reg:
-                    box_url = m.get('url')
+    if medias or jeu_data:
+        # 1. Capa ScreenScraper
+        if need_box:
+            box_url = None
+            for reg in ('br', 'us', 'wor', 'eu', 'ss', 'jp'):
+                for m in medias:
+                    if m.get('type') == 'box-2D' and m.get('region') == reg:
+                        box_url = m.get('url')
+                        break
+                if box_url:
                     break
-            if box_url:
-                break
-        if not box_url:
-            for m in medias:
-                if m.get('type') in ('box-2D', 'box-3D', 'flyer'):
-                    box_url = m.get('url')
-                    break
+            if not box_url:
+                for m in medias:
+                    if m.get('type') in ('box-2D', 'box-3D', 'flyer'):
+                        box_url = m.get('url')
+                        break
 
-        if box_url and download_media(box_url, box_file):
-            downloaded_any = True
-            with xml_lock:
-                ie = game_elem.find('image')
-                if ie is None: ie = ET.SubElement(game_elem, 'image')
-                ie.text = f"./images/{base_no_ext}-image.png"
+            if box_url and download_media(box_url, box_file):
+                downloaded_any = True
+                need_box = False
+                with xml_lock:
+                    ie = game_elem.find('image')
+                    if ie is None: ie = ET.SubElement(game_elem, 'image')
+                    ie.text = f"./images/{base_no_ext}-image.png"
 
-    # 2. Screenshot (In-Game Screenshot)
-    if need_ss:
-        ss_url = None
-        for m in medias:
-            if m.get('type') == 'ss':
-                ss_url = m.get('url')
-                break
-        if not ss_url:
+        # 2. Screenshot ScreenScraper
+        if need_ss:
+            ss_url = None
             for m in medias:
-                if m.get('type') == 'sstitle':
+                if m.get('type') == 'ss':
                     ss_url = m.get('url')
                     break
+            if not ss_url:
+                for m in medias:
+                    if m.get('type') == 'sstitle':
+                        ss_url = m.get('url')
+                        break
 
-        if ss_url and download_media(ss_url, ss_file):
-            downloaded_any = True
-            with xml_lock:
-                te = game_elem.find('thumbnail')
-                if te is None: te = ET.SubElement(game_elem, 'thumbnail')
-                te.text = f"./images/{base_no_ext}-thumb.png"
+            if ss_url and download_media(ss_url, ss_file):
+                downloaded_any = True
+                need_ss = False
+                with xml_lock:
+                    te = game_elem.find('thumbnail')
+                    if te is None: te = ET.SubElement(game_elem, 'thumbnail')
+                    te.text = f"./images/{base_no_ext}-thumb.png"
 
-    # 3. Marquee / Wheel (Logo)
-    if need_wheel:
-        wheel_url = None
-        for reg in ('br', 'us', 'wor', 'eu', 'ss', 'jp', None):
-            for m in medias:
-                if m.get('type') == 'wheel' and (m.get('region') == reg or reg is None):
-                    wheel_url = m.get('url')
+        # 3. Marquee ScreenScraper
+        if need_wheel:
+            wheel_url = None
+            for reg in ('br', 'us', 'wor', 'eu', 'ss', 'jp', None):
+                for m in medias:
+                    if m.get('type') == 'wheel' and (m.get('region') == reg or reg is None):
+                        wheel_url = m.get('url')
+                        break
+                if wheel_url:
                     break
-            if wheel_url:
-                break
-        if not wheel_url:
-            for m in medias:
-                if m.get('type') in ('wheel', 'wheel-steel', 'wheel-carbon', 'marquee'):
-                    wheel_url = m.get('url')
-                    break
+            if not wheel_url:
+                for m in medias:
+                    if m.get('type') in ('wheel', 'wheel-steel', 'wheel-carbon', 'marquee'):
+                        wheel_url = m.get('url')
+                        break
 
-        if wheel_url and download_media(wheel_url, wheel_file):
-            downloaded_any = True
-            with xml_lock:
-                me = game_elem.find('marquee')
-                if me is None: me = ET.SubElement(game_elem, 'marquee')
-                me.text = f"./images/{base_no_ext}-marquee.png"
+            if wheel_url and download_media(wheel_url, wheel_file):
+                downloaded_any = True
+                need_wheel = False
+                with xml_lock:
+                    me = game_elem.find('marquee')
+                    if me is None: me = ET.SubElement(game_elem, 'marquee')
+                    me.text = f"./images/{base_no_ext}-marquee.png"
 
-    # 4. Video snap
-    if need_video:
-        vid_url = None
-        for m in medias:
-            if m.get('type') == 'video-normalized':
-                vid_url = m.get('url')
-                break
-        if not vid_url:
+        # 4. Video ScreenScraper
+        if need_video:
+            vid_url = None
             for m in medias:
-                if m.get('type') == 'video':
+                if m.get('type') == 'video-normalized':
                     vid_url = m.get('url')
                     break
+            if not vid_url:
+                for m in medias:
+                    if m.get('type') == 'video':
+                        vid_url = m.get('url')
+                        break
 
-        if vid_url and download_media(vid_url, vid_file, min_size=1024):
-            downloaded_any = True
-            with xml_lock:
-                ve = game_elem.find('video')
-                if ve is None: ve = ET.SubElement(game_elem, 'video')
-                ve.text = f"./videos/{base_no_ext}-video.mp4"
+            if vid_url and download_media(vid_url, vid_file, min_size=1024):
+                downloaded_any = True
+                need_video = False
+                with xml_lock:
+                    ve = game_elem.find('video')
+                    if ve is None: ve = ET.SubElement(game_elem, 'video')
+                    ve.text = f"./videos/{base_no_ext}-video.mp4"
 
-    # 5. Metadata backfill
-    synopsis = jeu_data.get('synopsis', [])
-    desc_text = None
-    for s in synopsis:
-        if s.get('langue') in ('pt', 'br'):
-            desc_text = s.get('text')
-            break
-    if not desc_text:
+        # 5. Metadados
+        synopsis = jeu_data.get('synopsis', [])
+        desc_text = None
         for s in synopsis:
-            if s.get('langue') in ('en', 'us'):
+            if s.get('langue') in ('pt', 'br'):
                 desc_text = s.get('text')
                 break
+        if not desc_text:
+            for s in synopsis:
+                if s.get('langue') in ('en', 'us'):
+                    desc_text = s.get('text')
+                    break
 
-    with xml_lock:
-        if desc_text and game_elem.find('desc') is None:
-            d = ET.SubElement(game_elem, 'desc')
-            d.text = desc_text
-        dev = jeu_data.get('developpeur', {}).get('text')
-        if dev and game_elem.find('developer') is None:
-            d = ET.SubElement(game_elem, 'developer')
-            d.text = dev
-        pub = jeu_data.get('editeur', {}).get('text')
-        if pub and game_elem.find('publisher') is None:
-            p = ET.SubElement(game_elem, 'publisher')
-            p.text = pub
+        with xml_lock:
+            if desc_text and game_elem.find('desc') is None:
+                d = ET.SubElement(game_elem, 'desc')
+                d.text = desc_text
+            dev = jeu_data.get('developpeur', {}).get('text')
+            if dev and game_elem.find('developer') is None:
+                d = ET.SubElement(game_elem, 'developer')
+                d.text = dev
+            pub = jeu_data.get('editeur', {}).get('text')
+            if pub and game_elem.find('publisher') is None:
+                p = ET.SubElement(game_elem, 'publisher')
+                p.text = pub
+
+    # --- 2. FALLBACK INTELIGENTE: ArcadeDB (Arcade Italia) ---
+    # Ativado se o sistema for Arcade (MAME, FBNeo, etc.) e ainda faltar vídeo, capa ou screenshot!
+    if system_name in ARCADE_SYSTEMS and (need_video or need_box or need_ss or need_wheel):
+        adb_data = query_arcadedb(base_no_ext)
+        if adb_data:
+            # Video snap do ArcadeDB
+            adb_vid = adb_data.get("url_video_shortplay")
+            if need_video and adb_vid:
+                if download_media(adb_vid, vid_file, min_size=1024):
+                    downloaded_any = True
+                    source_used = "ArcadeDB"
+                    with xml_lock:
+                        ve = game_elem.find('video')
+                        if ve is None: ve = ET.SubElement(game_elem, 'video')
+                        ve.text = f"./videos/{base_no_ext}-video.mp4"
+
+            # Flyer do ArcadeDB
+            adb_flyer = adb_data.get("url_image_flyer")
+            if need_box and adb_flyer and download_media(adb_flyer, box_file, min_size=500):
+                downloaded_any = True
+                source_used = "ArcadeDB"
+                with xml_lock:
+                    ie = game_elem.find('image')
+                    if ie is None: ie = ET.SubElement(game_elem, 'image')
+                    ie.text = f"./images/{base_no_ext}-image.png"
+
+            # Screenshot Ingame do ArcadeDB
+            adb_ss = adb_data.get("url_image_ingame") or adb_data.get("url_image_title")
+            if need_ss and adb_ss and download_media(adb_ss, ss_file, min_size=500):
+                downloaded_any = True
+                source_used = "ArcadeDB"
+                with xml_lock:
+                    te = game_elem.find('thumbnail')
+                    if te is None: te = ET.SubElement(game_elem, 'thumbnail')
+                    te.text = f"./images/{base_no_ext}-thumb.png"
+
+            # Marquee do ArcadeDB
+            adb_mq = adb_data.get("url_image_marquee")
+            if need_wheel and adb_mq and download_media(adb_mq, wheel_file, min_size=500):
+                downloaded_any = True
+                source_used = "ArcadeDB"
+                with xml_lock:
+                    me = game_elem.find('marquee')
+                    if me is None: me = ET.SubElement(game_elem, 'marquee')
+                    me.text = f"./images/{base_no_ext}-marquee.png"
+
+            # Metadados complementares do ArcadeDB se estiverem vazios
+            with xml_lock:
+                mfg = adb_data.get("manufacturer")
+                if mfg and game_elem.find('developer') is None:
+                    d = ET.SubElement(game_elem, 'developer')
+                    d.text = mfg
 
     curr_p, curr_pct = progress_tracker.advance(base_no_ext, success=downloaded_any)
 
     if downloaded_any:
-        log(f"  [{system_name}] [{curr_p:>4}/{progress_tracker.total} | {curr_pct:4.1f}%] [MEDIA OK] {base_no_ext}")
+        log(f"  [{system_name}] [{curr_p:>4}/{progress_tracker.total} | {curr_pct:4.1f}%] [{source_used} OK] {base_no_ext}")
         return True
     return False
 
@@ -547,20 +632,30 @@ def scrape_system(system_name):
 
         box_file = os.path.join(img_dir, f"{base_no_ext}-image.png")
         ss_file = os.path.join(img_dir, f"{base_no_ext}-thumb.png")
+        vid_file = os.path.join(vid_dir, f"{base_no_ext}-video.mp4")
 
         has_box = os.path.exists(box_file) and os.path.getsize(box_file) > 1024
         has_ss = os.path.exists(ss_file) and os.path.getsize(ss_file) > 1024
+        has_vid = os.path.exists(vid_file) and os.path.getsize(vid_file) > 1024
 
-        # A game is considered already complete if it has both cover and screenshot
-        if has_box and has_ss:
-            already_done += 1
+        # For arcade systems, we actively check for videos too!
+        if sname in ARCADE_SYSTEMS:
+            if has_box and has_ss and has_vid:
+                already_done += 1
+            else:
+                pending_games.append(g)
         else:
-            pending_games.append(g)
+            if has_box and has_ss:
+                already_done += 1
+            else:
+                pending_games.append(g)
 
     initial_pct = (already_done / total_games * 100) if total_games > 0 else 0.0
 
     log(f"\n=======================================================")
     log(f"=== FULL SCRAPE: {sname.upper()} | Total: {total_games} | Já completos: {already_done} ({initial_pct:4.1f}%) | Pendentes: {len(pending_games)} | Free: {free_now:.1f} GB ===")
+    if sname in ARCADE_SYSTEMS:
+        log(f"[{sname}] Multi-Source Ativo: ScreenScraper + ArcadeDB (Arcade Italia)")
     log(f"=======================================================")
 
     if not pending_games:

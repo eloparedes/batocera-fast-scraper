@@ -4,9 +4,10 @@
 [![Python](https://img.shields.io/badge/Python-3.x-yellow.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![ScreenScraper API](https://img.shields.io/badge/Powered%20By-ScreenScraper-orange.svg)](https://www.screenscraper.fr)
+[![ArcadeDB](https://img.shields.io/badge/Fallback-ArcadeDB%20(Arcade%20Italia)-red.svg)](http://adb.arcadeitalia.net)
 
 > **Gerenciador completo, acelerado e inteligente de mídias para Batocera Linux.**  
-> Scraping com 5 threads simultâneas, barra de progresso visual, retomada inteligente (Smart Resume), detecção automática de plataformas e limpeza de mídias órfãs.
+> Scraping com 5 threads simultâneas, motor multi-fonte (ScreenScraper + ArcadeDB), barra de progresso visual, retomada inteligente (Smart Resume), detecção automática de plataformas e limpeza de mídias órfãs.
 
 ---
 
@@ -29,7 +30,11 @@ curl -sSL https://raw.githubusercontent.com/eloparedes/batocera-fast-scraper/mai
 
 ## 🌟 Principais Recursos
 
-- ⚡ **Alta Velocidade (5 Threads Paralelas):** Faz o download das mídias em paralelo aproveitando o limite máximo da API do ScreenScraper.
+- ⚡ **Alta Velocidade (5 Threads Paralelas):** Faz o download das mídias em paralelo com fila assíncrona ultra rápida.
+- 🌐 **Motor Multi-Fonte Inteligente (ScreenScraper + ArcadeDB):**
+  - Utiliza o **ScreenScraper** como provedor primário para todos os consoles e computadores.
+  - Ativa automaticamente o **ArcadeDB (Arcade Italia)** como fallback para sistemas Arcade (**MAME, Final Burn Neo, Neo-Geo, CPS-1/2/3, Naomi, Atomiswave, Model 2/3**).
+  - Garante **100% de vídeos e flyers** mesmo se a sua cota diária do ScreenScraper estourar ou se a ROM não tiver vídeo cadastrado na base principal!
 - 🧠 **Smart Resume (Retomada Inteligente):** Antes de iniciar, analisa sua biblioteca e detecta o que já está baixado. **Nunca mais recomeça do zero!** Se você pausar aos 60%, ele reinicia exatamente em 60%.
 - 📊 **Barra de Progresso Visual:** O comando `fast-scraper status` renderiza uma barra colorida `[████████░░░░]`, indicando porcentagem, jogos restantes e último download.
 - 🖼️ **Kit Completo de Mídias:**
