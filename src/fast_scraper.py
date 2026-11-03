@@ -346,7 +346,7 @@ def query_arcadedb(rom_short_name):
         pass
     return None
 
-def process_single_game(system_name, sys_id, base_dir, img_dir, vid_dir, game_elem, progress_tracker):
+def process_single_game(system_name, sys_id, base_dir, img_dir, vid_dir, game_elem, progress_tracker, provider="auto"):
     path_elem = game_elem.find('path')
     if path_elem is None or not path_elem.text:
         progress_tracker.advance("unknown", success=False)
@@ -378,35 +378,36 @@ def process_single_game(system_name, sys_id, base_dir, img_dir, vid_dir, game_el
         need_video = False
 
     downloaded_any = False
-    source_used = "ScreenScraper"
-
-    # --- 1. TENTATIVA PRINCIPAL: ScreenScraper API ---
-    ss_params = {
-        "devid": DEVID,
-        "devpassword": DEVPASS,
-        "softname": "RGSX",
-        "output": "json",
-        "ssid": SS_USER,
-        "sspassword": SS_PASS,
-        "systemeid": sys_id,
-        "romnom": fn
-    }
+    source_used = "ArcadeDB" if provider == "arcadedb" else "ScreenScraper"
 
     medias = []
     jeu_data = {}
     ss_failed = False
 
-    try:
-        r = requests.get(SS_API_URL, params=ss_params, timeout=12)
-        if r.status_code == 200:
-            jeu_data = r.json().get('response', {}).get('jeu', {})
-            medias = jeu_data.get('medias', [])
-        elif r.status_code in (430, 431):
+    # --- 1. TENTATIVA: ScreenScraper API (se provider != 'arcadedb') ---
+    if provider != "arcadedb":
+        ss_params = {
+            "devid": DEVID,
+            "devpassword": DEVPASS,
+            "softname": "RGSX",
+            "output": "json",
+            "ssid": SS_USER,
+            "sspassword": SS_PASS,
+            "systemeid": sys_id,
+            "romnom": fn
+        }
+
+        try:
+            r = requests.get(SS_API_URL, params=ss_params, timeout=12)
+            if r.status_code == 200:
+                jeu_data = r.json().get('response', {}).get('jeu', {})
+                medias = jeu_data.get('medias', [])
+            elif r.status_code in (430, 431):
+                ss_failed = True
+            else:
+                ss_failed = True
+        except Exception:
             ss_failed = True
-        else:
-            ss_failed = True
-    except Exception:
-        ss_failed = True
 
     if medias or jeu_data:
         # 1. Capa ScreenScraper
@@ -525,9 +526,10 @@ def process_single_game(system_name, sys_id, base_dir, img_dir, vid_dir, game_el
                 p = ET.SubElement(game_elem, 'publisher')
                 p.text = pub
 
-    # --- 2. FALLBACK INTELIGENTE: ArcadeDB (Arcade Italia) ---
-    # Ativado se o sistema for Arcade (MAME, FBNeo, etc.) e ainda faltar vídeo, capa ou screenshot!
-    if system_name in ARCADE_SYSTEMS and (need_video or need_box or need_ss or need_wheel):
+    # --- 2. ArcadeDB (Arcade Italia) ---
+    # Ativado se provider == 'arcadedb' OU se (provider != 'screenscraper' e sistema for Arcade)
+    use_arcadedb = (provider == "arcadedb") or (provider != "screenscraper" and system_name in ARCADE_SYSTEMS)
+    if use_arcadedb and (need_video or need_box or need_ss or need_wheel):
         adb_data = query_arcadedb(base_no_ext)
         if adb_data:
             # Video snap do ArcadeDB
@@ -585,11 +587,56 @@ def process_single_game(system_name, sys_id, base_dir, img_dir, vid_dir, game_el
         return True
     return False
 
-def scrape_system(system_name):
+def print_help():
+    print("""
+================================================================================
+FAST SCRAPER - Motor Multi-Threaded de Scraping para Batocera
+================================================================================
+USO:
+  fast-scraper start [sistemas...] [opções]
+  python3 fast_scraper.py [sistemas...] [opções]
+
+PROVEDORES DE SCRAPING (--provider, -p):
+  auto (Padrão)      Combina ScreenScraper (primário) + ArcadeDB (fallback).
+                     Para MAME, FBNeo e Arcades, se faltar vídeo, flyer ou screen,
+                     busca automaticamente no ArcadeDB.
+
+  arcadedb           Consulta EXCLUSIVAMENTE o ArcadeDB (Arcade Italia).
+                     Especial para MAME, FBNeo, Neo-Geo, CPS-1/2/3, etc.:
+                     - Sem limite diário de requisições (sem erro 431).
+                     - Baixa vídeos em MP4 de alta qualidade, flyers e screens.
+                     - Não necessita login nem cadastro.
+
+  screenscraper      Consulta EXCLUSIVAMENTE o ScreenScraper (modo estrito).
+
+OPÇÕES:
+  -p, --provider <nome>   Define o provedor: auto, arcadedb, screenscraper
+  --arcadedb              Atalho para --provider arcadedb
+  --screenscraper         Atalho para --provider screenscraper
+  --all                   Processa todas as plataformas que precisam de scrape
+  -h, --help              Exibe esta tela de ajuda
+
+EXEMPLOS PRÁTICOS:
+  # Scrapear MAME e FBNeo exclusivamente pelo ArcadeDB (sem gastar cota do ScreenScraper):
+  fast-scraper start mame fbneo --provider arcadedb
+
+  # Scrapear tudo com fallback automático inteligente (padrão):
+  fast-scraper start
+
+  # Scrapear SNES e Mega Drive:
+  fast-scraper start snes megadrive
+================================================================================
+""")
+
+def scrape_system(system_name, provider="auto"):
     sname = system_name.lower().strip()
     sid = SYSTEM_IDS.get(sname)
-    if not sid:
+    if not sid and provider != "arcadedb":
         log(f"[{sname}] Unsupported or unknown ScreenScraper system ID. Skipping.")
+        return
+
+    if provider == "arcadedb" and sname not in ARCADE_SYSTEMS:
+        log(f"[{sname}] ArcadeDB suporta apenas plataformas Arcade (MAME, FBNeo, Neo-Geo, CPS, etc.). Pulando.")
         return
 
     bdir = get_system_dir(sname)
@@ -638,8 +685,8 @@ def scrape_system(system_name):
         has_ss = os.path.exists(ss_file) and os.path.getsize(ss_file) > 1024
         has_vid = os.path.exists(vid_file) and os.path.getsize(vid_file) > 1024
 
-        # For arcade systems, we actively check for videos too!
-        if sname in ARCADE_SYSTEMS:
+        # For arcade systems (or arcadedb provider), check for videos too
+        if sname in ARCADE_SYSTEMS or provider == "arcadedb":
             if has_box and has_ss and has_vid:
                 already_done += 1
             else:
@@ -654,8 +701,14 @@ def scrape_system(system_name):
 
     log(f"\n=======================================================")
     log(f"=== FULL SCRAPE: {sname.upper()} | Total: {total_games} | Já completos: {already_done} ({initial_pct:4.1f}%) | Pendentes: {len(pending_games)} | Free: {free_now:.1f} GB ===")
-    if sname in ARCADE_SYSTEMS:
+    if provider == "arcadedb":
+        log(f"[{sname}] Provedor: ArcadeDB (Arcade Italia) [Exclusivo]")
+    elif provider == "screenscraper":
+        log(f"[{sname}] Provedor: ScreenScraper [Exclusivo]")
+    elif sname in ARCADE_SYSTEMS:
         log(f"[{sname}] Multi-Source Ativo: ScreenScraper + ArcadeDB (Arcade Italia)")
+    else:
+        log(f"[{sname}] Provedor: ScreenScraper")
     log(f"=======================================================")
 
     if not pending_games:
@@ -667,7 +720,7 @@ def scrape_system(system_name):
     saved_batch = 0
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_single_game, sname, sid, bdir, img_dir, vid_dir, g, progress_tracker): g for g in pending_games}
+        futures = {executor.submit(process_single_game, sname, sid, bdir, img_dir, vid_dir, g, progress_tracker, provider): g for g in pending_games}
         for future in as_completed(futures):
             res = future.result()
             if res:
@@ -686,23 +739,62 @@ def scrape_system(system_name):
         pass
 
 def main():
+    raw_args = sys.argv[1:]
+    if any(h in raw_args for h in ("-h", "--help", "help")):
+        print_help()
+        sys.exit(0)
+
     with open(PID_FILE, "w") as pf:
         pf.write(str(os.getpid()))
 
-    target_systems = sys.argv[1:]
+    provider_mode = "auto"
+    target_systems = []
+
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        if arg in ("-p", "--provider"):
+            if i + 1 < len(raw_args):
+                provider_mode = raw_args[i + 1].lower()
+                i += 2
+                continue
+        elif arg.startswith("--provider="):
+            provider_mode = arg.split("=", 1)[1].lower()
+            i += 1
+            continue
+        elif arg in ("--arcadedb", "-adb"):
+            provider_mode = "arcadedb"
+            i += 1
+            continue
+        elif arg in ("--screenscraper", "-ss"):
+            provider_mode = "screenscraper"
+            i += 1
+            continue
+        elif not arg.startswith("-"):
+            target_systems.append(arg.lower().strip())
+        i += 1
+
+    if provider_mode not in ("auto", "arcadedb", "adb", "screenscraper", "ss"):
+        log(f"Aviso: Provedor '{provider_mode}' desconhecido. Utilizando 'auto'.")
+        provider_mode = "auto"
+    if provider_mode == "adb":
+        provider_mode = "arcadedb"
+    elif provider_mode == "ss":
+        provider_mode = "screenscraper"
+
     if not target_systems or target_systems == ['all'] or target_systems == ['--all']:
         log("No specific systems provided. Auto-detecting all active platforms with games...")
         target_systems = auto_detect_systems()
         log(f"Auto-detected {len(target_systems)} platforms needing scrape: {target_systems}")
     else:
-        log(f"Starting Multi-Threaded Scraper ({MAX_WORKERS} workers) for specified systems: {target_systems}")
+        log(f"Starting Multi-Threaded Scraper ({MAX_WORKERS} workers) [Provider: {provider_mode}] for systems: {target_systems}")
 
     for s in target_systems:
         free_space = get_free_gb("/media/SHARE_1")
         if free_space < MIN_FREE_GB:
             log(f"CRITICAL: Free space {free_space:.1f} GB is below safety floor ({MIN_FREE_GB} GB). Aborting remaining queue.")
             break
-        scrape_system(s)
+        scrape_system(s, provider=provider_mode)
 
     log("\n=== All Scraper Tasks Finished! ===")
     if os.path.exists(PID_FILE):

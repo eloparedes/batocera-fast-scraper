@@ -65,10 +65,20 @@ show_help() {
     echo -e "    ${C_GREEN}log${C_RESET}                      Acompanha o download ao vivo no terminal com contador [X/TOTAL]."
     echo ""
     echo -e "  ${C_BOLD}${C_CYAN}2. SCRAPING & DOWNLOAD${C_RESET}"
-    echo -e "    ${C_GREEN}start${C_RESET}                    Detecta ${C_BOLD}automaticamente${C_RESET} todas as plataformas com jogos"
-    echo -e "                             instalados e faz o scrape completo daquelas com mídias pendentes."
-    echo -e "                             ${C_DIM}(Pula sistemas que já estão 100% completos).${C_RESET}"
-    echo -e "    ${C_GREEN}start <sis1> <sis2>...${C_RESET}   Scrapeia apenas as plataformas especificadas."
+    echo -e "    ${C_GREEN}start [sistemas...] [opções]${C_RESET}"
+    echo -e "                             Inicia o download acelerado de mídias em background (5 threads)."
+    echo -e "                             Se nenhum sistema for informado, autodetecta todas as plataformas"
+    echo -e "                             com mídias pendentes (pula as que já estiverem completas)."
+    echo -e ""
+    echo -e "                             ${C_BOLD}Opções de Provedores (--provider, -p):${C_RESET}"
+    echo -e "                               ${C_YELLOW}--provider auto${C_RESET}          ${C_BOLD}(Padrão)${C_RESET} ScreenScraper + ArcadeDB automático."
+    echo -e "                                                        Usa ScreenScraper como base e ativa fallback"
+    echo -e "                                                        para ArcadeDB em sistemas Arcade/MAME/FBNeo."
+    echo -e "                               ${C_YELLOW}--provider arcadedb${C_RESET}      Consulta ${C_BOLD}EXCLUSIVA${C_RESET} no ArcadeDB (Arcade Italia)."
+    echo -e "                                                        - ${C_GREEN}Sem limite diário de requisições${C_RESET} (sem erro 431)!"
+    echo -e "                                                        - Vídeos MP4, flyers e ingame snaps para MAME/FBNeo."
+    echo -e "                                                        - Não precisa de conta nem cadastro."
+    echo -e "                               ${C_YELLOW}--provider screenscraper${C_RESET} Consulta ${C_BOLD}EXCLUSIVA${C_RESET} no ScreenScraper (modo estrito)."
     echo ""
     echo -e "  ${C_BOLD}${C_CYAN}3. LIMPEZA & MANUTENÇÃO DE ESPAÇO${C_RESET}"
     echo -e "    ${C_GREEN}clean <sistema>${C_RESET}          Remove com segurança as mídias de uma plataforma específica."
@@ -103,16 +113,19 @@ show_help() {
     echo -e "  ${C_DIM}# 3. Ver o progresso atual com barra visual:${C_RESET}"
     echo -e "  ${C_BOLD}fast-scraper status${C_RESET}"
     echo ""
-    echo -e "  ${C_DIM}# 4. Iniciar o scrape de tudo que estiver faltando:${C_RESET}"
+    echo -e "  ${C_DIM}# 4. Iniciar o scrape de tudo que estiver faltando (modo auto com fallback):${C_RESET}"
     echo -e "  ${C_BOLD}fast-scraper start${C_RESET}"
     echo ""
-    echo -e "  ${C_DIM}# 5. Scrapear apenas Game Boy Advance e NES:${C_RESET}"
+    echo -e "  ${C_DIM}# 5. Scrapear MAME e FBNeo pelo ArcadeDB (sem limite diário e 100% vídeos):${C_RESET}"
+    echo -e "  ${C_BOLD}fast-scraper start mame fbneo --provider arcadedb${C_RESET}"
+    echo ""
+    echo -e "  ${C_DIM}# 6. Scrapear apenas Game Boy Advance e NES:${C_RESET}"
     echo -e "  ${C_BOLD}fast-scraper start gba nes${C_RESET}"
     echo ""
-    echo -e "  ${C_DIM}# 6. Simular quanto espaço você recupera se limpar mídias órfãs:${C_RESET}"
+    echo -e "  ${C_DIM}# 7. Simular quanto espaço você recupera se limpar mídias órfãs:${C_RESET}"
     echo -e "  ${C_BOLD}fast-scraper clean-orphans --dry-run${C_RESET}"
     echo ""
-    echo -e "  ${C_DIM}# 7. Limpar todas as mídias órfãs de todo o Batocera:${C_RESET}"
+    echo -e "  ${C_DIM}# 8. Limpar todas as mídias órfãs de todo o Batocera:${C_RESET}"
     echo -e "  ${C_BOLD}fast-scraper clean-orphans${C_RESET}"
     echo ""
     echo -e "${C_BOLD}${C_CYAN}================================================================================${C_RESET}"
@@ -167,6 +180,12 @@ case "$1" in
         ;;
 
     start)
+        for arg in "$@"; do
+            if [ "$arg" = "-h" ] || [ "$arg" = "--help" ] || [ "$arg" = "help" ]; then
+                show_help
+                exit 0
+            fi
+        done
         PID=$(get_pid)
         if [ -n "$PID" ]; then
             echo -e "\033[1;33mScraper já está em execução (PID: $PID).\033[0m"
@@ -174,13 +193,13 @@ case "$1" in
             exit 0
         fi
         shift # remove 'start'
-        SYSTEMS="$@"
-        if [ -z "$SYSTEMS" ]; then
+        PARAMS="$@"
+        if [ -z "$PARAMS" ]; then
             echo -e "\033[1;36mNenhum sistema informado: Identificando automaticamente todas as plataformas com jogos...\033[0m"
             nohup python3 "$PYTHON_SCRIPT" > /userdata/system/logs/fast_scraper_runner.log 2>&1 &
         else
-            echo -e "\033[1;36mIniciando Scraper para sistemas específicos: $SYSTEMS\033[0m"
-            nohup python3 "$PYTHON_SCRIPT" $SYSTEMS > /userdata/system/logs/fast_scraper_runner.log 2>&1 &
+            echo -e "\033[1;36mIniciando Scraper: $PARAMS\033[0m"
+            nohup python3 "$PYTHON_SCRIPT" $PARAMS > /userdata/system/logs/fast_scraper_runner.log 2>&1 &
         fi
         NEW_PID=$!
         echo "$NEW_PID" > "$PID_FILE"

@@ -104,6 +104,21 @@ Para baixar apenas plataformas escolhidas:
 fast-scraper start gba nes snes
 ```
 
+#### Opção C: Selecionar o Provedor (`--provider`)
+Você pode definir de onde as mídias devem ser baixadas:
+
+```bash
+# 1. Provedor Auto (Padrão): ScreenScraper primário + ArcadeDB fallback inteligente
+fast-scraper start --provider auto
+
+# 2. Provedor ArcadeDB Exclusivo (Ideal para MAME, FBNeo e Neo-Geo):
+# Não gasta cota diária do ScreenScraper e garante 100% de vídeos e flyers!
+fast-scraper start mame fbneo --provider arcadedb
+
+# 3. Provedor ScreenScraper Exclusivo (modo tradicional):
+fast-scraper start snes megadrive --provider screenscraper
+```
+
 ---
 
 ### 4. Limpeza de Mídias Órfãs (Ganha Gigabytes)
